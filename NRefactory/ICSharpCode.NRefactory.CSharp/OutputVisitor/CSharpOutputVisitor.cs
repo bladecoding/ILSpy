@@ -1769,7 +1769,11 @@ namespace ICSharpCode.NRefactory.CSharp
 			WriteEmbeddedStatement(ifElseStatement.TrueStatement);
 			if (!ifElseStatement.FalseStatement.IsNull) {
 				WriteKeyword(IfElseStatement.ElseKeywordRole);
-				WriteEmbeddedStatement(ifElseStatement.FalseStatement);
+
+				if (ifElseStatement.FalseStatement is IfElseStatement)
+					ifElseStatement.FalseStatement.AcceptVisitor(this);
+				else
+					WriteEmbeddedStatement(ifElseStatement.FalseStatement);
 			}
 			EndNode(ifElseStatement);
 		}
