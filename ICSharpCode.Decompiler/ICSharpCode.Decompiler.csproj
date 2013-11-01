@@ -62,6 +62,7 @@
     <Compile Include="Ast\TextOutputFormatter.cs" />
     <Compile Include="Ast\Transforms\AddCheckedBlocks.cs" />
     <Compile Include="Ast\Transforms\CombineQueryExpressions.cs" />
+    <Compile Include="Ast\Transforms\StringConcatToAddition.cs" />
     <Compile Include="Ast\Transforms\ContextTrackingVisitor.cs" />
     <Compile Include="Ast\Transforms\ConvertConstructorCallIntoInitializer.cs" />
     <Compile Include="Ast\Transforms\CustomPatterns.cs" />
