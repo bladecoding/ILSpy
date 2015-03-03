@@ -37,7 +37,7 @@ namespace ICSharpCode.ILSpy.TreeNodes
 		}
 		
 		public override object Text {
-			get { return r.Name; }
+			get { return r.Name + r.MetadataToken.ToSuffixString(); }
 		}
 		
 		public override object Icon {

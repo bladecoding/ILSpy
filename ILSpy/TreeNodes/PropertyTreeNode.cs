@@ -57,7 +57,7 @@ namespace ICSharpCode.ILSpy.TreeNodes
 
 		public override object Text
 		{
-			get { return GetText(property, Language, isIndexer); }
+			get { return GetText(property, Language, isIndexer) + property.MetadataToken.ToSuffixString(); }
 		}
 
 		public static object GetText(PropertyDefinition property, Language language, bool? isIndexer = null)

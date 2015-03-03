@@ -68,6 +68,7 @@ namespace ICSharpCode.ILSpy.TreeNodes
 			}
 			b.Append(") : ");
 			b.Append(language.TypeToString(method.ReturnType, false, method.MethodReturnType));
+			b.Append(method.MetadataToken.ToSuffixString());
 			return HighlightSearchMatch(method.Name, b.ToString());
 		}
 

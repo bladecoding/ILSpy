@@ -32,6 +32,7 @@ using ICSharpCode.Decompiler.Ast.Transforms;
 using ICSharpCode.ILSpy.XmlDoc;
 using ICSharpCode.NRefactory.TypeSystem;
 using ICSharpCode.NRefactory.TypeSystem.Implementation;
+using CSharp = ICSharpCode.NRefactory.CSharp;
 using ICSharpCode.NRefactory.VB;
 using ICSharpCode.NRefactory.VB.Visitors;
 using Mono.Cecil;
@@ -126,6 +127,7 @@ namespace ICSharpCode.ILSpy.VB
 		{
 			const string ns = "http://schemas.microsoft.com/developer/msbuild/2003";
 			string platformName = CSharpLanguage.GetPlatformName(module);
+			Guid guid = App.CommandLineArguments.FixedGuid ?? Guid.NewGuid();
 			using (XmlTextWriter w = new XmlTextWriter(writer)) {
 				w.Formatting = Formatting.Indented;
 				w.WriteStartDocument();
@@ -134,7 +136,7 @@ namespace ICSharpCode.ILSpy.VB
 				w.WriteAttributeString("DefaultTargets", "Build");
 
 				w.WriteStartElement("PropertyGroup");
-				w.WriteElementString("ProjectGuid", Guid.NewGuid().ToString().ToUpperInvariant());
+				w.WriteElementString("ProjectGuid", guid.ToString("B").ToUpperInvariant());
 
 				w.WriteStartElement("Configuration");
 				w.WriteAttributeString("Condition", " '$(Configuration)' == '' ");
@@ -159,21 +161,36 @@ namespace ICSharpCode.ILSpy.VB
 				}
 
 				w.WriteElementString("AssemblyName", module.Assembly.Name.Name);
-				switch (module.Runtime) {
-					case TargetRuntime.Net_1_0:
-						w.WriteElementString("TargetFrameworkVersion", "v1.0");
-						break;
-					case TargetRuntime.Net_1_1:
-						w.WriteElementString("TargetFrameworkVersion", "v1.1");
-						break;
-					case TargetRuntime.Net_2_0:
-						w.WriteElementString("TargetFrameworkVersion", "v2.0");
-						// TODO: Detect when .NET 3.0/3.5 is required
-						break;
-					default:
-						w.WriteElementString("TargetFrameworkVersion", "v4.0");
-						// TODO: Detect TargetFrameworkProfile
-						break;
+				bool useTargetFrameworkAttribute = false;
+				var targetFrameworkAttribute = module.Assembly.CustomAttributes.FirstOrDefault(a => a.AttributeType.FullName == "System.Runtime.Versioning.TargetFrameworkAttribute");
+				if (targetFrameworkAttribute != null && targetFrameworkAttribute.ConstructorArguments.Any()) {
+					string frameworkName = (string)targetFrameworkAttribute.ConstructorArguments[0].Value;
+					string[] frameworkParts = frameworkName.Split(',');
+					string frameworkVersion = frameworkParts.FirstOrDefault(a => a.StartsWith("Version="));
+					if (frameworkVersion != null) {
+						w.WriteElementString("TargetFrameworkVersion", frameworkVersion.Substring("Version=".Length));
+						useTargetFrameworkAttribute = true;
+					}
+					string frameworkProfile = frameworkParts.FirstOrDefault(a => a.StartsWith("Profile="));
+					if (frameworkProfile != null)
+						w.WriteElementString("TargetFrameworkProfile", frameworkProfile.Substring("Profile=".Length));
+				}
+				if (!useTargetFrameworkAttribute) {
+					switch (module.Runtime) {
+						case TargetRuntime.Net_1_0:
+							w.WriteElementString("TargetFrameworkVersion", "v1.0");
+							break;
+						case TargetRuntime.Net_1_1:
+							w.WriteElementString("TargetFrameworkVersion", "v1.1");
+							break;
+						case TargetRuntime.Net_2_0:
+							w.WriteElementString("TargetFrameworkVersion", "v2.0");
+							// TODO: Detect when .NET 3.0/3.5 is required
+							break;
+						default:
+							w.WriteElementString("TargetFrameworkVersion", "v4.0");
+							break;
+					}
 				}
 				w.WriteElementString("WarningLevel", "4");
 
@@ -248,6 +265,25 @@ namespace ICSharpCode.ILSpy.VB
 			return true;
 		}
 
+		IEnumerable<Tuple<string, string>> WriteAssemblyInfo(ModuleDefinition module, DecompilationOptions options, HashSet<string> directories)
+		{
+			// don't automatically load additional assemblies when an assembly node is selected in the tree view
+			using (LoadedAssembly.DisableAssemblyLoad())
+			{
+				AstBuilder codeDomBuilder = CreateAstBuilder(options, currentModule: module);
+				codeDomBuilder.AddAssembly(module, onlyAssemblyLevel: true);
+				codeDomBuilder.RunTransformations(transformAbortCondition);
+
+				string prop = "Properties";
+				if (directories.Add("Properties"))
+					Directory.CreateDirectory(Path.Combine(options.SaveAsProjectDirectory, prop));
+				string assemblyInfo = Path.Combine(prop, "AssemblyInfo" + this.FileExtension);
+				using (StreamWriter w = new StreamWriter(Path.Combine(options.SaveAsProjectDirectory, assemblyInfo)))
+					codeDomBuilder.GenerateCode(new PlainTextOutput(w));
+				return new Tuple<string, string>[] { Tuple.Create("Compile", assemblyInfo) };
+			}
+		}
+
 		IEnumerable<Tuple<string, string>> WriteCodeFilesInProject(ModuleDefinition module, DecompilationOptions options, HashSet<string> directories)
 		{
 			var files = module.Types.Where(t => IncludeTypeWhenDecompilingProject(t, options)).GroupBy(
@@ -276,7 +312,7 @@ namespace ICSharpCode.ILSpy.VB
 					}
 				});
 			AstMethodBodyBuilder.PrintNumberOfUnhandledOpcodes();
-			return files.Select(f => Tuple.Create("Compile", f.Key));
+			return files.Select(f => Tuple.Create("Compile", f.Key)).Concat(WriteAssemblyInfo(module, options, directories));
 		}
 		#endregion
 
@@ -405,8 +441,16 @@ namespace ICSharpCode.ILSpy.VB
 		void RunTransformsAndGenerateCode(AstBuilder astBuilder, ITextOutput output, DecompilationOptions options, ModuleDefinition module)
 		{
 			astBuilder.RunTransformations(transformAbortCondition);
-			if (options.DecompilerSettings.ShowXmlDocumentation)
-				AddXmlDocTransform.Run(astBuilder.SyntaxTree);
+			if (options.DecompilerSettings.ShowXmlDocumentation) {
+				try {
+					AddXmlDocTransform.Run(astBuilder.SyntaxTree);
+				} catch (XmlException ex) {
+					string[] msg = (" Exception while reading XmlDoc: " + ex.ToString()).Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+					var insertionPoint = astBuilder.SyntaxTree.FirstChild;
+					for (int i = 0; i < msg.Length; i++)
+						astBuilder.SyntaxTree.InsertChildBefore(insertionPoint, new CSharp.Comment(msg[i], CSharp.CommentType.Documentation), CSharp.Roles.Comment);
+				}
+			}
 			var csharpUnit = astBuilder.SyntaxTree;
 			csharpUnit.AcceptVisitor(new NRefactory.CSharp.InsertParenthesesVisitor() { InsertParenthesesForReadability = true });
 			var unit = csharpUnit.AcceptVisitor(new CSharpToVBConverterVisitor(new ILSpyEnvironmentProvider()), null);

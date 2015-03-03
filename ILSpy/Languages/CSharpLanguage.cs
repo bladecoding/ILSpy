@@ -215,7 +215,14 @@ namespace ICSharpCode.ILSpy
 				additionalTransform.Run(astBuilder.SyntaxTree);
 			}
 			if (options.DecompilerSettings.ShowXmlDocumentation) {
-				AddXmlDocTransform.Run(astBuilder.SyntaxTree);
+				try {
+					AddXmlDocTransform.Run(astBuilder.SyntaxTree);
+				} catch (XmlException ex) {
+					string[] msg = (" Exception while reading XmlDoc: " + ex.ToString()).Split(new[]{'\r', '\n'}, StringSplitOptions.RemoveEmptyEntries);
+					var insertionPoint = astBuilder.SyntaxTree.FirstChild;
+					for (int i = 0; i < msg.Length; i++)
+						astBuilder.SyntaxTree.InsertChildBefore(insertionPoint, new Comment(msg[i], CommentType.Documentation), Roles.Comment);
+				}
 			}
 			astBuilder.GenerateCode(output);
 		}
@@ -257,6 +264,21 @@ namespace ICSharpCode.ILSpy
 					return module.Architecture.ToString();
 			}
 		}
+
+		public static string GetRuntimeDisplayName(ModuleDefinition module)
+		{
+			switch (module.Runtime) {
+				case TargetRuntime.Net_1_0:
+					return ".NET 1.0";
+				case TargetRuntime.Net_1_1:
+					return ".NET 1.1";
+				case TargetRuntime.Net_2_0:
+					return ".NET 2.0";
+				case TargetRuntime.Net_4_0:
+					return ".NET 4.0";
+			}
+			return null;
+		}
 		
 		public override void DecompileAssembly(LoadedAssembly assembly, ITextOutput output, DecompilationOptions options)
 		{
@@ -278,19 +300,9 @@ namespace ICSharpCode.ILSpy
 				if ((mainModule.Attributes & ModuleAttributes.ILOnly) == 0) {
 					output.WriteLine("// This assembly contains unmanaged code.");
 				}
-				switch (mainModule.Runtime) {
-					case TargetRuntime.Net_1_0:
-						output.WriteLine("// Runtime: .NET 1.0");
-						break;
-					case TargetRuntime.Net_1_1:
-						output.WriteLine("// Runtime: .NET 1.1");
-						break;
-					case TargetRuntime.Net_2_0:
-						output.WriteLine("// Runtime: .NET 2.0");
-						break;
-					case TargetRuntime.Net_4_0:
-						output.WriteLine("// Runtime: .NET 4.0");
-						break;
+				string runtimeName = GetRuntimeDisplayName(mainModule);
+				if (runtimeName != null) {
+					output.WriteLine("// Runtime: " + runtimeName);
 				}
 				output.WriteLine();
 				
@@ -309,6 +321,7 @@ namespace ICSharpCode.ILSpy
 		{
 			const string ns = "http://schemas.microsoft.com/developer/msbuild/2003";
 			string platformName = GetPlatformName(module);
+			Guid guid = App.CommandLineArguments.FixedGuid ?? Guid.NewGuid();
 			using (XmlTextWriter w = new XmlTextWriter(writer)) {
 				w.Formatting = Formatting.Indented;
 				w.WriteStartDocument();
@@ -317,7 +330,7 @@ namespace ICSharpCode.ILSpy
 				w.WriteAttributeString("DefaultTargets", "Build");
 
 				w.WriteStartElement("PropertyGroup");
-				w.WriteElementString("ProjectGuid", Guid.NewGuid().ToString().ToUpperInvariant());
+				w.WriteElementString("ProjectGuid", guid.ToString("B").ToUpperInvariant());
 
 				w.WriteStartElement("Configuration");
 				w.WriteAttributeString("Condition", " '$(Configuration)' == '' ");
@@ -342,21 +355,36 @@ namespace ICSharpCode.ILSpy
 				}
 
 				w.WriteElementString("AssemblyName", module.Assembly.Name.Name);
-				switch (module.Runtime) {
-					case TargetRuntime.Net_1_0:
-						w.WriteElementString("TargetFrameworkVersion", "v1.0");
-						break;
-					case TargetRuntime.Net_1_1:
-						w.WriteElementString("TargetFrameworkVersion", "v1.1");
-						break;
-					case TargetRuntime.Net_2_0:
-						w.WriteElementString("TargetFrameworkVersion", "v2.0");
-						// TODO: Detect when .NET 3.0/3.5 is required
-						break;
-					default:
-						w.WriteElementString("TargetFrameworkVersion", "v4.0");
-						// TODO: Detect TargetFrameworkProfile
-						break;
+				bool useTargetFrameworkAttribute = false;
+				var targetFrameworkAttribute = module.Assembly.CustomAttributes.FirstOrDefault(a => a.AttributeType.FullName == "System.Runtime.Versioning.TargetFrameworkAttribute");
+				if (targetFrameworkAttribute != null && targetFrameworkAttribute.ConstructorArguments.Any()) {
+					string frameworkName = (string)targetFrameworkAttribute.ConstructorArguments[0].Value;
+					string[] frameworkParts = frameworkName.Split(',');
+					string frameworkVersion = frameworkParts.FirstOrDefault(a => a.StartsWith("Version="));
+					if (frameworkVersion != null) {
+						w.WriteElementString("TargetFrameworkVersion", frameworkVersion.Substring("Version=".Length));
+						useTargetFrameworkAttribute = true;
+					}
+					string frameworkProfile = frameworkParts.FirstOrDefault(a => a.StartsWith("Profile="));
+					if (frameworkProfile != null)
+						w.WriteElementString("TargetFrameworkProfile", frameworkProfile.Substring("Profile=".Length));
+				}
+				if (!useTargetFrameworkAttribute) {
+					switch (module.Runtime) {
+						case TargetRuntime.Net_1_0:
+							w.WriteElementString("TargetFrameworkVersion", "v1.0");
+							break;
+						case TargetRuntime.Net_1_1:
+							w.WriteElementString("TargetFrameworkVersion", "v1.1");
+							break;
+						case TargetRuntime.Net_2_0:
+							w.WriteElementString("TargetFrameworkVersion", "v2.0");
+							// TODO: Detect when .NET 3.0/3.5 is required
+							break;
+						default:
+							w.WriteElementString("TargetFrameworkVersion", "v4.0");
+							break;
+					}
 				}
 				w.WriteElementString("WarningLevel", "4");
 
@@ -423,6 +451,25 @@ namespace ICSharpCode.ILSpy
 			return true;
 		}
 
+		IEnumerable<Tuple<string, string>> WriteAssemblyInfo(ModuleDefinition module, DecompilationOptions options, HashSet<string> directories)
+		{
+			// don't automatically load additional assemblies when an assembly node is selected in the tree view
+			using (LoadedAssembly.DisableAssemblyLoad())
+			{
+				AstBuilder codeDomBuilder = CreateAstBuilder(options, currentModule: module);
+				codeDomBuilder.AddAssembly(module, onlyAssemblyLevel: true);
+				codeDomBuilder.RunTransformations(transformAbortCondition);
+
+				string prop = "Properties";
+				if (directories.Add("Properties"))
+					Directory.CreateDirectory(Path.Combine(options.SaveAsProjectDirectory, prop));
+				string assemblyInfo = Path.Combine(prop, "AssemblyInfo" + this.FileExtension);
+				using (StreamWriter w = new StreamWriter(Path.Combine(options.SaveAsProjectDirectory, assemblyInfo)))
+					codeDomBuilder.GenerateCode(new PlainTextOutput(w));
+				return new Tuple<string, string>[] { Tuple.Create("Compile", assemblyInfo) };
+			}
+		}
+
 		IEnumerable<Tuple<string, string>> WriteCodeFilesInProject(ModuleDefinition module, DecompilationOptions options, HashSet<string> directories)
 		{
 			var files = module.Types.Where(t => IncludeTypeWhenDecompilingProject(t, options)).GroupBy(
@@ -452,7 +499,7 @@ namespace ICSharpCode.ILSpy
 					}
 				});
 			AstMethodBodyBuilder.PrintNumberOfUnhandledOpcodes();
-			return files.Select(f => Tuple.Create("Compile", f.Key));
+			return files.Select(f => Tuple.Create("Compile", f.Key)).Concat(WriteAssemblyInfo(module, options, directories));
 		}
 		#endregion
 
